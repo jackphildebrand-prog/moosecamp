@@ -36,6 +36,9 @@
   .cat { margin:14px 4px 6px; }
   .cat button { width:100%; text-align:left; background:none; border:0; border-bottom:2px solid var(--tan); padding:6px 2px; font-size:18px; font-weight:800; color:var(--spruce); display:flex; justify-content:space-between; align-items:baseline; }
   .cat button span { font-weight:400; color:var(--moss); font-size:14px; white-space:nowrap; }
+  .cat { display:flex; align-items:stretch; }
+  .cat button:first-child { flex:1; }
+  .catmenu { flex:none; width:44px; border:0 !important; border-bottom:2px solid var(--tan) !important; background:none; color:var(--moss); font-size:22px; font-weight:800; }
   .cat.closed + .items { display:none; }
 
   .item { background:#F6F1E4; border:1px solid var(--canvas-deep); border-left:6px solid var(--canvas-deep); border-radius:10px; margin-bottom:8px; padding:10px 12px; }
@@ -124,6 +127,19 @@ let closedCats = {};
 
 const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
 const catsIn = items => [...new Set(items.map(i => i.category))].sort((a, b) => a.localeCompare(b));
+const allCats = () => [...new Set(CATS.concat(data.items.map(i => i.category)))].sort((a, b) => a.localeCompare(b));
+function fillCatSelect() {
+  const sel = document.getElementById("newCat"); const keep = sel.value;
+  sel.innerHTML = allCats().map(c => `<option>${esc(c)}</option>`).join("") + `<option value="__new">+ New category…</option>`;
+  if (keep && [...sel.options].some(o => o.value === keep)) sel.value = keep;
+}
+function pickCategory(current) {
+  const list = allCats();
+  const msg = "Move to which category? Type the number, or type a new name:\n" + list.map((c, i) => `${i + 1}. ${c}`).join("\n");
+  const ans = (prompt(msg, current) || "").trim(); if (!ans) return null;
+  const n = parseInt(ans, 10);
+  return (n >= 1 && n <= list.length && String(n) === ans) ? list[n - 1] : ans;
+}
 
 async function load() {
   const r = await fetch(DB_URL + "?select=*", { headers: H });
@@ -170,6 +186,8 @@ function itemHtml(it) {
     ${claims}${notes}
     <div class="more">
       <button data-note>+ Add a note</button>
+      <button data-rename>Rename</button>
+      <button data-move>Move to…</button>
       <button data-flip>${it.own ? "Make it shared gear" : "Make it everyone-brings"}</button>
       <button data-remove class="danger">Remove</button>
     </div>
@@ -183,12 +201,29 @@ function planHtml() {
     const list = items.filter(i => i.category === c);
     const need = list.filter(i => !i.own && !i.claims.length).length;
     const tag = need ? `${need} still need someone` : "all covered";
-    return `<div class="cat ${closedCats[c] ? "closed" : ""}"><button data-cat="${esc(c)}">${esc(c)} <span>${tag} ${closedCats[c] ? "▸" : "▾"}</span></button></div>
+    return `<div class="cat ${closedCats[c] ? "closed" : ""}"><button data-cat="${esc(c)}">${esc(c)} <span>${tag} ${closedCats[c] ? "▸" : "▾"}</span></button>
+      <button class="catmenu" data-catmenu="${esc(c)}" aria-label="Category options">⋯</button></div>
       <div class="items">${list.map(itemHtml).join("")}</div>`;
   }).join("");
 }
 
+async function bulk(method, filter, body) { await save(method, `${DB_URL}?${filter}`, body); }
+
 function wirePlan() {
+  document.querySelectorAll("[data-catmenu]").forEach(b => b.onclick = () => {
+    const c = b.dataset.catmenu;
+    const ans = (prompt(`"${c}" — type 1 to rename it, or 2 to delete it and everything in it:`) || "").trim();
+    if (ans === "1") {
+      const name = (prompt("New name for this category:", c) || "").trim(); if (!name || name === c) return;
+      change(d => { d.items.forEach(i => { if (i.category === c) i.category = name; }); },
+             () => bulk("PATCH", "category=eq." + encodeURIComponent(c), { category: name }));
+    } else if (ans === "2") {
+      const n = data.items.filter(i => i.category === c).length;
+      if (!confirm(`Delete "${c}" and its ${n} item(s) for everyone?`)) return;
+      change(d => { d.items = d.items.filter(i => i.category !== c); },
+             () => bulk("DELETE", "category=eq." + encodeURIComponent(c)));
+    }
+  });
   document.querySelectorAll("[data-cat]").forEach(b => b.onclick = () => { closedCats[b.dataset.cat] = !closedCats[b.dataset.cat]; render(); });
   document.querySelectorAll(".item[data-id]").forEach(el => {
     const id = el.dataset.id;
@@ -203,6 +238,15 @@ function wirePlan() {
       const text = (prompt("Add a note about " + cur().name + ":") || "").trim(); if (!text) return;
       const it = cur(); const notes = it.notes.concat({ who: me, text });
       change(d => { it.notes = notes; }, () => save("PATCH", rowUrl(id), { notes }));
+    };
+    el.querySelector("[data-rename]").onclick = () => {
+      const it = cur(); const name = (prompt("Rename this item:", it.name) || "").trim(); if (!name || name === it.name) return;
+      change(d => { it.name = name; d.items.sort(byName); }, () => save("PATCH", rowUrl(id), { name }));
+    };
+    el.querySelector("[data-move]").onclick = () => {
+      const it = cur(); const category = pickCategory(it.category); if (!category || category === it.category) return;
+      closedCats[category] = false;
+      change(d => { it.category = category; }, () => save("PATCH", rowUrl(id), { category }));
     };
     el.querySelector("[data-flip]").onclick = () => {
       const it = cur(); const own = !it.own;
@@ -254,6 +298,7 @@ function wirePack() {
 
 function render() {
   renderWho();
+  if (document.activeElement !== document.getElementById("newCat")) fillCatSelect();
   document.getElementById("tabPlan").classList.toggle("on", view === "plan");
   document.getElementById("tabPack").classList.toggle("on", view === "pack");
   document.getElementById("planView").style.display = view === "plan" ? "" : "none";
@@ -272,7 +317,13 @@ function render() {
 
 document.getElementById("tabPlan").onclick = () => { view = "plan"; render(); };
 document.getElementById("tabPack").onclick = () => { view = "pack"; render(); };
-document.getElementById("newCat").innerHTML = CATS.map(c => `<option>${esc(c)}</option>`).join("");
+fillCatSelect();
+document.getElementById("newCat").onchange = e => {
+  if (e.target.value !== "__new") return;
+  const name = (prompt("Name of the new category:") || "").trim();
+  if (name) { const o = document.createElement("option"); o.textContent = name; e.target.insertBefore(o, e.target.lastElementChild); e.target.value = name; }
+  else e.target.value = allCats()[0];
+};
 
 function addItem(name, category, kind) {
   const body = { name, category, own: kind === "all", personal: kind === "me" ? me : null, claims: kind === "me" ? [me] : [] };
