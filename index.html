@@ -63,6 +63,8 @@
   .item.open .more { display:flex; gap:16px; flex-wrap:wrap; }
   .more button { background:none; border:0; color:var(--moss); text-decoration:underline; padding:4px 0; font-size:15px; }
   .more button.danger { color:#9a2f12; }
+  .movelab { display:flex; align-items:center; gap:6px; font-size:15px; color:var(--moss); width:100%; }
+  .movelab select { flex:1; padding:8px; border-radius:8px; border:1px solid var(--tan); background:#fff; color:var(--ink); min-width:0; }
 
   .pack { display:flex; align-items:center; gap:12px; background:#F6F1E4; border:1px solid var(--canvas-deep); border-radius:10px; margin-bottom:8px; padding:12px; font-size:18px; font-weight:600; cursor:pointer; }
   .pack input { width:26px; height:26px; accent-color:var(--blaze); flex:none; }
@@ -128,18 +130,12 @@ let closedCats = {};
 
 const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
 const catsIn = items => [...new Set(items.map(i => i.category))].sort((a, b) => a.localeCompare(b));
+const bringing = it => it.own ? PEOPLE.filter(p => !it.claims.includes(p)) : it.claims;
 const allCats = () => [...new Set(CATS.concat(data.items.map(i => i.category)))].sort((a, b) => a.localeCompare(b));
 function fillCatSelect() {
   const sel = document.getElementById("newCat"); const keep = sel.value;
   sel.innerHTML = allCats().map(c => `<option>${esc(c)}</option>`).join("") + `<option value="__new">+ New category…</option>`;
   if (keep && [...sel.options].some(o => o.value === keep)) sel.value = keep;
-}
-function pickCategory(current) {
-  const list = allCats();
-  const msg = "Move to which category? Type the number, or type a new name:\n" + list.map((c, i) => `${i + 1}. ${c}`).join("\n");
-  const ans = (prompt(msg, current) || "").trim(); if (!ans) return null;
-  const n = parseInt(ans, 10);
-  return (n >= 1 && n <= list.length && String(n) === ans) ? list[n - 1] : ans;
 }
 
 async function load() {
@@ -175,12 +171,14 @@ function renderWho() {
 
 /* ---------- The list ---------- */
 function itemHtml(it) {
-  const mine = it.claims.includes(me);
-  const cls = it.own ? "all" : (mine ? "mine" : (it.claims.length ? "" : "none"));
+  const who = bringing(it);
+  const mine = who.includes(me);
+  const cls = mine ? "mine" : (who.length ? (it.own ? "all" : "") : "none");
   const badge = it.own ? `<span class="badge">Everyone brings</span>` : "";
-  const claims = it.own ? "" : `<div class="claims">` + PEOPLE.map(p =>
-    `<button data-claim="${p}" class="${it.claims.includes(p) ? "on" : ""} ${p === me ? "me" : ""}">${p}</button>`).join("") + `</div>` +
-    (it.claims.length ? "" : `<div class="nobody">Nobody's got this yet</div>`);
+  const claims = `<div class="claims">` + PEOPLE.map(p =>
+    `<button data-claim="${p}" class="${who.includes(p) ? "on" : ""} ${p === me ? "me" : ""}">${p}</button>`).join("") + `</div>` +
+    (who.length ? "" : `<div class="nobody">Nobody's got this yet</div>`);
+  const moveSel = `<select data-move aria-label="Move to category">` + allCats().map(c => `<option ${c === it.category ? "selected" : ""}>${esc(c)}</option>`).join("") + `<option value="__new">+ New category…</option></select>`;
   const notes = it.notes.length ? `<div class="notes">` + it.notes.map(n => `<div class="note"><b>${esc(n.who)}:</b> ${esc(n.text)}</div>`).join("") + `</div>` : "";
   return `<div class="item ${cls} ${openId === it.id ? "open" : ""}" data-id="${it.id}">
     <div class="top"><button class="name">${esc(it.name)}</button>${badge}</div>
@@ -188,7 +186,7 @@ function itemHtml(it) {
     <div class="more">
       <button data-note>+ Add a note</button>
       <button data-rename>Rename</button>
-      <button data-move>Move to…</button>
+      <label class="movelab">Move to ${moveSel}</label>
       <button data-flip>${it.own ? "Make it shared gear" : "Make it everyone-brings"}</button>
       <button data-remove class="danger">Remove</button>
     </div>
@@ -200,7 +198,7 @@ function planHtml() {
   if (!items.length) return `<div class="item">Nothing here yet — add something above.</div>`;
   return catsIn(items).map(c => {
     const list = items.filter(i => i.category === c);
-    const need = list.filter(i => !i.own && !i.claims.length).length;
+    const need = list.filter(i => !i.own && !bringing(i).length).length;
     const tag = need ? `${need} still need someone` : "all covered";
     return `<div class="cat ${closedCats[c] ? "closed" : ""}"><button data-cat="${esc(c)}">${esc(c)} <span>${tag} ${closedCats[c] ? "▸" : "▾"}</span></button>
       <button class="catmenu" data-catmenu="${esc(c)}" aria-label="Category options">⋯</button></div>
@@ -233,6 +231,7 @@ function wirePlan() {
     el.querySelectorAll("[data-claim]").forEach(b => b.onclick = () => {
       const it = cur(); if (!it) return; const p = b.dataset.claim;
       const claims = it.claims.includes(p) ? it.claims.filter(x => x !== p) : it.claims.concat(p);
+      // for "everyone brings" items, being listed means opted OUT — same toggle, opposite meaning
       change(d => { it.claims = claims; }, () => save("PATCH", rowUrl(id), { claims }));
     });
     el.querySelector("[data-note]").onclick = () => {
@@ -244,14 +243,16 @@ function wirePlan() {
       const it = cur(); const name = (prompt("Rename this item:", it.name) || "").trim(); if (!name || name === it.name) return;
       change(d => { it.name = name; d.items.sort(byName); }, () => save("PATCH", rowUrl(id), { name }));
     };
-    el.querySelector("[data-move]").onclick = () => {
-      const it = cur(); const category = pickCategory(it.category); if (!category || category === it.category) return;
+    el.querySelector("[data-move]").onchange = e => {
+      const it = cur(); let category = e.target.value;
+      if (category === "__new") { category = (prompt("Name of the new category:") || "").trim(); if (!category) { e.target.value = it.category; return; } }
+      if (category === it.category) return;
       closedCats[category] = false;
       change(d => { it.category = category; }, () => save("PATCH", rowUrl(id), { category }));
     };
     el.querySelector("[data-flip]").onclick = () => {
-      const it = cur(); const own = !it.own;
-      change(d => { it.own = own; }, () => save("PATCH", rowUrl(id), { own }));
+      const it = cur(); const own = !it.own; const claims = [];
+      change(d => { it.own = own; it.claims = claims; }, () => save("PATCH", rowUrl(id), { own, claims }));
     };
     el.querySelector("[data-remove]").onclick = () => {
       if (!confirm("Remove this item for everyone?")) return;
@@ -262,7 +263,7 @@ function wirePlan() {
 
 /* ---------- Packing ---------- */
 function packHtml(who) {
-  const list = data.items.filter(i => i.own || i.claims.includes(who) || i.personal === who);
+  const list = data.items.filter(i => bringing(i).includes(who) || i.personal === who);
   const done = list.filter(i => i.packed.includes(who)).length;
   document.getElementById("packTitle").textContent = who === me ? "My list" : who + "'s list";
   document.getElementById("packProgress").textContent = list.length ? `${done} of ${list.length} packed` : "";
